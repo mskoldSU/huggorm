@@ -1,0 +1,121 @@
+---
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Getting data
+
+
+Dates of viper observations in Stockholms län 2019-2021 downloaded from artportalen
+```{r}
+library(tidyverse)
+obs_dates <- read_csv("huggorm.csv")
+obs_dates
+```
+
+Summarise as number of observations per date
+```{r}
+daily_obs <- count(obs_dates, date, name = "n_vipers") 
+daily_obs
+```
+
+Daily max temperature at Bromma airport downloaded from SMHI's API
+```{r}
+max_temp <- read_csv2("https://opendata-download-metobs.smhi.se/api/version/1.0/parameter/20/station/97200/period/corrected-archive/data.csv", skip = 8) %>% 
+  select(date = `Representativt dygn`, max_temp = Lufttemperatur) %>% 
+  filter(lubridate::year(date) %in% 2019:2021) %>% 
+  mutate(max_temp = as.numeric(max_temp)) # Daily 
+max_temp
+```
+
+
+Hourly relative humidity (%) downloaded from SMHI's API and summarised as daily average over 10:00-18:00
+```{r}
+humidity <- read_csv2("https://opendata-download-metobs.smhi.se/api/version/1.0/parameter/6/station/97200/period/corrected-archive/data.csv", skip = 8) %>% 
+  select(date = Datum, time = `Tid (UTC)`, humidity = `Relativ Luftfuktighet`) %>% 
+  filter(lubridate::year(date) %in% 2019:2021, 
+         lubridate::hour(time) %in% 10:18) %>% 
+  group_by(date) %>% 
+  summarise(humidity = mean(humidity))
+humidity
+```
+
+Join tables and add flag for weekend, day of year and flag for "wet" weather (more than 60% relative humidity)
+```{r}
+weather_data <- full_join(max_temp, humidity, by = "date")
+weather_data
+
+full_data <- left_join(weather_data, daily_obs, by = "date") %>% 
+  mutate(n_vipers = ifelse(is.na(n_vipers), 0, n_vipers), # Turn NAs to zero
+         weekend = ifelse(lubridate::wday(date) %in% c(1, 7), 1, 0), # Day 1=Sunday, 7=Saturday
+         day = lubridate::yday(date), # Julian day
+         wet = ifelse(humidity > 60, 1, 0),
+         ) 
+full_data
+```
+
+## Exploratory 
+
+More vipers on weekends:
+```{r}
+full_data %>% group_by(weekend) %>% 
+  summarise(mean(n_vipers))
+```
+
+
+More vipers on dry days (but winter months are wet!):
+```{r}
+full_data %>% group_by(wet) %>% 
+  summarise(mean(n_vipers))
+```
+
+Smoothed daily averages, high-season in March-May:
+```{r}
+full_data %>% ggplot(aes(x = date, y = n_vipers)) + 
+  geom_point(alpha = .3) + 
+  geom_smooth(method.args = list(family = "poisson"), method = "gam", formula = y ~ s(x, k = 15)) +
+  theme_bw()
+```
+
+High-season, less vipers on cold days:
+```{r}
+full_data %>% filter(lubridate::month(date) %in% 3:5) %>% 
+  ggplot(aes(x = max_temp, y = n_vipers)) + 
+  geom_point(alpha = .3) + 
+  geom_smooth(method.args = list(family = "poisson"), method = "gam") +
+  theme_bw()
+```
+
+High-season, less vipers on wet days:
+```{r}
+full_data %>% filter(lubridate::month(date) %in% 3:5) %>% 
+  ggplot(aes(x = humidity, y = n_vipers)) + 
+  geom_point(alpha = .3) + 
+  geom_smooth(method.args = list(family = "poisson"), method = "gam") +
+  theme_bw()
+```
+
+# Model fitting
+
+This is tricky due to the complex interactions between weather, season, people and vipers. Needs a clear goal. Simple example using a Poisson regression model with smooth terms for day and max_temp (restricted to high-season). 
+
+
+```{r}
+library(mgcv)
+model_fit <- gam(n_vipers ~  s(max_temp, k = 10) + s(day, k = 10) + wet + weekend, 
+                 family = "poisson", 
+                 data = full_data %>% filter(lubridate::month(date) %in% 3:5))
+summary(model_fit)
+```
+
+Plots of smooth terms (max_temp and day)
+```{r}
+plot(model_fit, pages = 1, shade = TRUE, trans = exp)
+```
+
+
+
+
